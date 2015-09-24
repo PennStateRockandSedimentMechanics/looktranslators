@@ -34,7 +34,6 @@ tested on p655intact100l, p1876ssd05hr05l --both produce good headers and data v
 cjm 10.2.10 modify to work with new look data format as double. lv2look will now produce a data file of doubles. 
 We don't need to change the way data comes in from the A2D files, only the way things get written into a look file.
 
-cjm 30.5.12 modify byte count check sum (~ line 212) to deal with fact that logger sometimes quits before writing the last few secs of data, which means that the rec. number is incorrect. 
 
 compile:
 cc -o lv2look lv2look.c -lm  -I/usr/openwin/include
@@ -71,6 +70,7 @@ char	data[50], outf[50];
 char	xchan_data_acquisition = 'n';
 char	xchan_16bit = 'n';
 char	xchan_24bit = 'n';
+char	force16 = 'n';
 char	*buf, *buf2;
 int	n_chans;
 int	n_files;
@@ -80,12 +80,13 @@ double *f_pointer[MAX_COL];
 
 	if(ac < 2)
 	{
-		fprintf(stderr,"usage: %s filename [-a]\n",progname);
+		fprintf(stderr,"usage: %s filename [-a, -f]\n",progname);
 		fprintf(stderr,"\t'filename' is the base filename for the exp.\n");
 		fprintf(stderr,"\toutput is to a file named *l -the letter ell is appended to 'filename'\n");
 		fprintf(stderr,"\tthe -a option gives a tab-delimited ascii table of the data to stdout\n");
-		fprintf(stderr,"\tThis program reads data (from the 24-bit or 16 bit recorders) written by LabView.\nIt expects to read time and 4 additional channels, or time and a variable number of channels plus a footer (header)\n\n");
-        	fprintf(stderr,"lv2look Version: 20120531\n\n");
+		fprintf(stderr,"\tthe -f option forces a 16 bit conversion. It is useful for files that aren't written properly (recorder stopped before fully writing last record?); it reduces n_rec to (n_byte-336)/(2*nchan)");
+		fprintf(stderr,"\nThis program reads data (from the 24-bit or 16 bit recorders) written by LabView.\nIt expects to read time and 4 additional channels, or time and a variable number of channels plus a footer (header)\n\n");
+                fprintf(stderr,"Version: 22.09.2015\n\n");
 		exit(1);
 	}
 
@@ -97,6 +98,9 @@ double *f_pointer[MAX_COL];
 			
 			case 'a':
                                 ascii_out = 'y';
+                                break;
+			case 'f':
+                                force16 = 'y';
                                 break;
                 }
  
@@ -200,23 +204,19 @@ double *f_pointer[MAX_COL];
 		fseek(data_file,0L,SEEK_END);	
 		n_byte = ftell(data_file);		/*determine the byte length, so that we can determine the number of records*/
 					/*determine if it is a 24 bit file or a 16 bit file*/
-		if(n_byte == n_rec*2*n_chans+336)		/*16 bit*/
+		if(n_byte == n_rec*2*n_chans+336 || force16 == 'y')		/*16 bit*/
 		{
 			xchan_16bit = 'y';
+			if(force16 == 'y')	/*assume that last rec. didn't get written completely, so that file size isn't correct*/
+				n_rec = floor( (n_byte-336)/(2*n_chans));
 		}
 		else if (n_byte == n_rec*4*n_chans+336)	/*24 bit*/
 		{
 			xchan_24bit = 'y';
 		}
-		else if ( (n_byte-336) % (4*n_chans) == 0 ) /*check to see if n_rec is incorrect, because logger quit early, before writing everything*/
-		{
-			fprintf(stderr,"\n%c%c%cReading file %s: File has %d bytes of data, n_rec=%d,  n_chan=%d\n\nWarning: File appears to be 24 bit but size doesn't match n_rec and n_chans. Footer is 336 bytes, file size should be: n_rec*4*n_chans+336= %d. \nProceeding on assumption that n_rec should be:%d\n", BELL, BELL, BELL, data, n_byte, n_rec, n_chans, n_rec*4*n_chans+336, (n_byte-336)/(4*n_chans));
-			n_rec = (n_byte-336)/(4*n_chans) ;
-			xchan_24bit = 'y';
-		}
 		else
 		{
-			fprintf(stderr,"Problem reading the data file and/or header. \nFile appears to be written by xchan but size doesn't match expected size for 16 bit or 24 bit recorder.\nReading file %s: File has %d bytes of data, %d recs, %d chans\n",data, n_byte, n_rec, n_chans);
+			fprintf(stderr,"Problem reading the data file and/or header. \nFile appears to be written by xchan but size doesn't match expected size for 16 bit or 24 bit recorder.\nFooter size should be 336 bytes.\nReading file %s: File has %d bytes of data, %d recs, %d chans\n If I believe n_rec and n_chan, this file should have %d bytes if it's a 16 bit file and %d bytes if it's a 24 bit file\nMaybe try the -f option ?\n",data, n_byte, n_rec, n_chans, 336+(2*n_chans*n_rec), 336+(4*n_chans*n_rec));
 			exit(1);
 		}
 	}
@@ -262,13 +262,31 @@ double *f_pointer[MAX_COL];
 	}
 
 
-        fprintf(stderr,"lv2look Version: 20120531\n\n");
+        fprintf(stderr,"Version: 12.2.2010\n\n");
 	fprintf(stderr,"Reading file %s: %s-bit File has %d bytes of data, %d recs, %d chans\n",data, ((xchan_24bit == 'y') ? "24" : "16"),n_byte, n_rec, n_chans);
 
+/* 20150922: I changed the way this works, so that it outputs the whole first record. */
+	fprintf(stderr,"First recs are:\n\ttime");
+	for(i=0; i<n_chans-1; ++i)
+	   fprintf(stderr,", ch%d", i+2);
+	fprintf(stderr,"\n\t");
+
 	if(xchan_24bit == 'y') 				
-	   fprintf(stderr,"First recs are:\n\ttime, ch0, ch1, ch2, ch3\n\t%d, %d, %d, %d, %d\n",*int_pointer,*(int_pointer+1),*(int_pointer+2),*(int_pointer+3),*(int_pointer+4));
+	{
+	for(i=0; i<n_chans; ++i)
+	   fprintf(stderr,"%d%c ",*(int_pointer+i), i==n_chans-1 ? ' ': ',');
+	}
+/*fprintf(stderr,"%d, %d, %d, %d, %d\n",*int_pointer,*(int_pointer+1),*(int_pointer+2),*(int_pointer+3),*(int_pointer+4));*/
 	else  				
-	  fprintf(stderr,"First recs are:\n\ttime, ch0, ch1, ch2, ch3\n\t%.3f, %hd, %hd, %hd, %hd\n",(double) *short_orig_data,*(short_orig_data+1),*(short_orig_data+2),*(short_orig_data+3),*(short_orig_data+4));
+	{
+	for(i=0; i<n_chans; ++i)
+	   fprintf(stderr,"%d%c ",*(short_orig_data+i), i==n_chans-1 ? ' ': ',');
+	}
+	fprintf(stderr,"\n");
+
+/*
+	  fprintf(stderr,"First recs are:\n\ttime, ch0, ch1, ch2, ch3\n\t%.3f, %hd, %hd, %hd, %hd\n",(double) *short_orig_data,*(short_orig_data+1),*(short_orig_data+2),*(short_orig_data+3),*(short_orig_data+4));*/
+
 
 
 /* put data in look table ; data are written to channels 0-15 at this point, but look data and header are written from 1-16 */
