@@ -1,13 +1,17 @@
 /*  asc2look.c  */
 
+/*modifications 20150514 cjm: added auto rec and col count */
+/*2015 05 25, cjm: added file_length check for look title, which can't be > 20 chars*/
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
+#include <string.h>
 #include <math.h>
 #include <arpa/inet.h>
 #include "global.h"
 #define SEEK_END 2
-	
+#define BF_SIZE 1024	
+
 struct  header   head;                      /*header for look , defined in global.h*/
 
 
@@ -15,40 +19,56 @@ int main(ac,av)
 int ac;
 char *av[];
 {
-	void exit(), *calloc();
+	void 	exit(), *calloc();
 	void	null_col(), rite_lookfile(); 
-	int i , j;
-//	char *strcat(), *strcpy(), outfile[50];
-	char outfile[50];
+	int 	i , j;
+        char 	outfile[BF_SIZE], buf3[21];
 	FILE    *infile, *dfile, *fopen();
+	int     token_count(), line_cnt=0;
+	char    buf[BF_SIZE],buf2[BF_SIZE],file_buf[BF_SIZE];
+	char    *char_c,char_str[BF_SIZE];
 
-	if(ac != 4) 
+	if(ac != 2) 
 	{
-		fprintf(stderr,"This program converts an ascii table (numbers separated by white space) to a look file. Output is a look format binary file with the letter ell appended to the filename\n"); 
+		fprintf(stderr,"This program converts an ascii table (numbers separated by white spaceor comma) to a look file. Output is a look format binary file with the letter ell appended to the filename\nVersion is: 2015 05 25\n"); 
 		fprintf(stderr,"The first two lines of the file should have column names and units\n"); 
-		fprintf(stderr,"Usage:  asc2look #records #columns filename \n"); 
+		/*fprintf(stderr,"Usage:  asc2look #records #columns filename \n"); */
+		fprintf(stderr,"Usage:  asc2look filename \n"); 
 		exit(1);
 	}
 
-
-/*open a file to write. Append the letter ell */
- 	strcpy(outfile,av[3]); 
+						/*open the file to read */
+ 	strcpy(outfile,av[1]); 
 	if ((infile  = fopen(outfile, "r")) == NULL) 
 	{
-		fprintf(stderr,"Error. Couldn't open the input file to write. \n"); 
+		fprintf(stderr,"Error. Couldn't open the input file to read. \n"); 
 		exit(1);
 	}
+						/*open a file to write. Append the letter ell */
  	strcat(outfile,"l"); 
 	if ((dfile  = fopen(outfile, "w")) == NULL) 
 	{
 		fprintf(stderr,"Error. Couldn't open the file to write. Do you have write permission in this directory?\n"); 
 		exit(1);
 	}
-        strcpy(head.title,av[3]);
-	sscanf(av[1],"%d",&(head.nrec));
-	sscanf(av[2],"%d",&(head.nchan));
-	
-//	strcpy(head.title,av[3]);
+
+
+        while(fgets(file_buf,BF_SIZE,infile) != NULL)         /*read the next line, until the end of the file*/
+		line_cnt++;	
+						/*use the last line to count the number of columns*/
+	head.nchan = token_count(file_buf);
+	head.nrec = line_cnt-2;
+
+	rewind(infile);
+						/*use the filename for the title for xlook*/
+	if(strlen(outfile)>20)
+	{
+		strncpy(buf3,outfile,19);
+		fprintf(stderr,"Sorry. xlook can only handle a 20 character file title. We'll use %s in the look title. You may want to change the filename\n",buf3); 
+		strncpy(head.title,buf3,19);
+	}
+	else
+		strcpy(head.title,av[1]);
 
 	for( i=0; i < head.nchan+1; ++i )
           darray[i] = (double *)calloc((unsigned)head.nrec,(unsigned)sizeof(double)) ;
@@ -68,12 +88,28 @@ char *av[];
 		head.ch[j].gain = 1.0 ;
 	}
 
+	rewind(infile);
+        fgets(file_buf,BF_SIZE,infile);	/*read past first two lines*/
+        fgets(file_buf,BF_SIZE,infile);
+
+	strcpy(buf2,", \t");     /*allow tokens to be separated by space, tab or comma*/
+
 	for(i=0; i<head.nrec; ++i)
 	{
+        	if( fgets(file_buf,BF_SIZE,infile) == NULL)         /*hmmm, we shouldn't have run out of lines already*/
+		{
+			fprintf(stderr,"Hmmm, file is supposed to have %d recs in it, but we already reached the end\n"
+,head.nrec);	
+			exit(1);
+		}
+		strcpy(buf,file_buf);
+		char_c = strtok(buf,buf2) ;     /*initiate strtok*/
 		for(j=1; j <= head.nchan; ++j)
 		{
-			fscanf(infile,"%lf",&(darray[j][i]));
-		}
+			sscanf(char_c,"%lf",&(darray[j][i]));
+			char_c=strtok(NULL,buf2);      /*initiate strtok*/
+		}	
+
 	}
 
         	/*write data in look format*/
@@ -119,8 +155,8 @@ int col ;
 
 void rite_lookfile(FILE *dfile)
 {
-  int i, j ;
-  double temp;
+  int i;
+  int write_32();
 
   fwrite(&(head.title[0]),1,20,dfile) ;
   write_32(&(head.nrec),1,dfile) ;
@@ -249,4 +285,32 @@ int write_32(int *target, int count, FILE *file)
 }
 
 
+#define OUT 0
+#define IN 1
+
+int token_count(buf)
+char buf[];
+{
+
+int state, n, i;
+
+        state=OUT;                      /* count the number of tokens in buf */
+        for(n=0,i=0; buf[i] != '\0'; ++i)
+        {
+                if(buf[i] == ' ' || buf[i] == ','  || buf[i] == '\t' || buf[i] == '\n')
+                {
+                        state=OUT;
+                }
+                else if(state==OUT)
+                {
+                        state=IN;
+                        ++n;
+                }
+        }
+
+        return(n);
+}
+
+#undef OUT
+#undef IN
 
