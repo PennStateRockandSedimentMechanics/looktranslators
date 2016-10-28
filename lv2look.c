@@ -34,6 +34,7 @@ tested on p655intact100l, p1876ssd05hr05l --both produce good headers and data v
 cjm 10.2.10 modify to work with new look data format as double. lv2look will now produce a data file of doubles. 
 We don't need to change the way data comes in from the A2D files, only the way things get written into a look file.
 
+cjm 20161027 modify to deal with incomplete, wrong, or missing footers
 
 compile:
 cc -o lv2look lv2look.c -lm  -I/usr/openwin/include
@@ -43,6 +44,7 @@ cc -o lv2look lv2look.c -lm  -I/usr/openwin/include
 #include <stdlib.h>
 #include <strings.h>
 #include <math.h>
+#include <ctype.h>
 #include <arpa/inet.h>
 #include "global.h"
 #define SEEK_END 2
@@ -64,15 +66,16 @@ unsigned int n_byte, n_rec;
 int	*orig_data;
 int 	*int_pointer;
 short   *short_p, *short_orig_data;
+int	file_has_no_footer = 0;
 char 	ascii_out = 'n', footer_out = 'n'; 
 char	time = 'n', gain_flag[32], string[50], lv_date[9], lv_time[9];
 char	data[50], outf[50];
 char	xchan_data_acquisition = 'n';
 char	xchan_16bit = 'n';
 char	xchan_24bit = 'n';
-char	force16 = 'n';
+char	force24 = 'n', force16 = 'n';
 char	*buf, *buf2;
-int	n_chans;
+int	n_chans, n_chans_in_footer;
 int	n_files;
 double *f_pointer[MAX_COL]; 
 
@@ -80,15 +83,18 @@ double *f_pointer[MAX_COL];
 
 	if(ac < 2)
 	{
-		fprintf(stderr,"usage: %s filename [-a, -f]\n",progname);
+		fprintf(stderr,"usage: %s filename [-a, -f, -m]\n",progname);
 		fprintf(stderr,"\t'filename' is the base filename for the exp.\n");
 		fprintf(stderr,"\toutput is to a file named *l -the letter ell is appended to 'filename'\n");
 		fprintf(stderr,"\tthe -a option gives a tab-delimited ascii table of the data to stdout\n");
-		fprintf(stderr,"\tthe -f option forces a 16 bit conversion. It is useful for files that aren't written properly (recorder stopped before fully writing last record?); it reduces n_rec to (n_byte-336)/(2*nchan)");
+		fprintf(stderr,"\tthe -f option forces a 16 bit conversion. It is useful for files that aren't written properly (recorder stopped before fully writing last record?); it reduces n_rec to (n_byte-336)/(2*nchan)\n");
+		fprintf(stderr,"\tthe -m option forces a 24 bit conversion. It is useful for files that aren't written properly (recorder stopped before fully writing last record?, footer is missing, etc.) You'll be prompted for info. on the file\n");
 		fprintf(stderr,"\nThis program reads data (from the 24-bit or 16 bit recorders) written by LabView.\nIt expects to read time and 4 additional channels, or time and a variable number of channels plus a footer (header)\n\n");
-                fprintf(stderr,"Version: 22.09.2015\n\n");
+                fprintf(stderr,"Version: 28.10.2016\n\n");
 		exit(1);
 	}
+
+        fprintf(stderr,"lv2look version: 28.10.2016\n\n");
 
         for(i=2;i<ac;i++)
         {
@@ -101,6 +107,9 @@ double *f_pointer[MAX_COL];
                                 break;
 			case 'f':
                                 force16 = 'y';
+                                break;
+			case 'm':
+                                force24 = 'y';
                                 break;
                 }
  
@@ -134,6 +143,11 @@ double *f_pointer[MAX_COL];
 	fread(string, 32, 1, data_file);	/*filename, title*/
 /*note to cjm 13.12.05: global.h assumes 20 chars for title and 13 each for name/units. Change this? */
 	strlcpy(lookhead.title, string, 20);
+
+	if(strncmp(string, av[1], 4) != 0)		//filename should be in header
+		file_has_no_footer++;
+						//could just quit here, but let's check a bit more, just to make sure
+
 	fread(string, 16, 1, data_file);	/*Number of recs*/
 	n_rec = atoi(string);
 	fread(gain_flag, 16, 1, data_file);	/*Channel A2D gain flag */
@@ -145,7 +159,7 @@ double *f_pointer[MAX_COL];
 
 
 
-	n_chans=1;	/*there is always a time channel*/
+	n_chans_in_footer = n_chans=1;	/*there is always a time channel*/
 	strcpy(lookhead.ch[1].name, "Time");		/*data are written to channels 0-15, but header is written from 1-16*/
 
 /* note: cjm 12.2.07, footer size assumes 15 channels+time channel. We should change this to allow up to 31 channels of data + time */
@@ -181,28 +195,31 @@ double *f_pointer[MAX_COL];
 			n_chans++;
 		}
 	}
+	n_chans_in_footer = n_chans;	/*save this in case we need it later */
 
-/*now check to see if, indeed, the file was written by xchan */
+	fseek(data_file,0L,SEEK_END);	
+	n_byte = ftell(data_file);		/*determine the byte length, so that we can determine the number of records*/
+
 	if(n_chans == 1)		/*if n_chans ==1, the file does not have a footer. */
 	{
-		xchan_data_acquisition = 'n'; 	/*Use this as a flag, below, to indicate 4-chan (16 bit)  vs. xchan recorder*/
+		file_has_no_footer++;
 		strcpy(lookhead.title,av[1]); 
-		n_chans = 5;
+	}
 
+	if(file_has_no_footer && force24 == 'n')
+	{
+		xchan_data_acquisition = 'n'; 	/*Use this as a flag, below, to indicate 4-chan (16 bit)  vs. xchan recorder*/
+		n_chans = 5;
 		strcpy(lookhead.ch[2].name, "Vert_Disp");
 		strcpy(lookhead.ch[3].name, "Vert_Load");
 		strcpy(lookhead.ch[4].name, "Hor_Disp");
 		strcpy(lookhead.ch[5].name, "Hor_Load.");
 
-		fseek(data_file,0L,SEEK_END);	
-		n_byte = ftell(data_file);		/*determine the byte length, so that we can determine the number of records*/
-/*		 n_rec = (n_byte-8)/(4*n_chans); This would be for a 4-chan 24bit recorder, but we don't have one*/
-		 n_rec = n_byte/(2*n_chans);
+				//assume this is a 16 bit file
+		n_rec = n_byte/(2*n_chans);
 	}	
-	else				/*the file has a footer*/
+	else				/*the file has a footer or it's a 24 bit file w/o a footer*/
 	{
-		fseek(data_file,0L,SEEK_END);	
-		n_byte = ftell(data_file);		/*determine the byte length, so that we can determine the number of records*/
 					/*determine if it is a 24 bit file or a 16 bit file*/
 		if(n_byte == n_rec*2*n_chans+336 || force16 == 'y')		/*16 bit*/
 		{
@@ -210,14 +227,62 @@ double *f_pointer[MAX_COL];
 			if(force16 == 'y')	/*assume that last rec. didn't get written completely, so that file size isn't correct*/
 				n_rec = floor( (n_byte-336)/(2*n_chans));
 		}
-		else if (n_byte == n_rec*4*n_chans+336)	/*24 bit*/
-		{
+		else if(n_byte == n_rec*4*n_chans+336)	/*24 bit*/
 			xchan_24bit = 'y';
-		}
-		else
+		else 
 		{
-			fprintf(stderr,"Problem reading the data file and/or header. \nFile appears to be written by xchan but size doesn't match expected size for 16 bit or 24 bit recorder.\nFooter size should be 336 bytes.\nReading file %s: File has %d bytes of data, %d recs, %d chans\n If I believe n_rec and n_chan, this file should have %d bytes if it's a 16 bit file and %d bytes if it's a 24 bit file\nMaybe try the -f option ?\n",data, n_byte, n_rec, n_chans, 336+(2*n_chans*n_rec), 336+(4*n_chans*n_rec));
-			exit(1);
+			if(file_has_no_footer)
+				fprintf(stderr,"Problem reading the data file and/or footer. \nFile: %s appears to be written by xchan but size is not correct for 16 bit or 24 bit recorder.\nLooks like the footer is missing.\n",av[1]);
+			else
+				fprintf(stderr,"Problem reading the data file and/or footer. \nFile appears to be written by xchan but size is not correct for 16 bit or 24 bit recorder.\nFooter size should be 336 bytes.\nReading file %s: File has %d bytes of data, and footer reports %d recs and %d chans plus time.\n If I believe n_rec and n_chan, this file should have %d bytes if it's a 16 bit file and %d bytes if it's a 24 bit file\n\n",data, n_byte, n_rec, n_chans-1, 336+(2*n_chans*n_rec), 336+(4*n_chans*n_rec));
+			fprintf(stderr,"\nIf you want to write an xlook file anyway, enter the number of channels recorded (not including time), otherwise just hit return and we'll quit.\n");
+			fgets(string, 3, stdin);
+			n_chans = atoi(string);
+			memset(string,0,sizeof(string));
+			if(n_chans !=0)
+			{
+			 n_chans++; //to include time
+			 fprintf(stderr,"Was this recorded w/ the 16 or 24-bit recorder? Enter 16 or 24\n");
+			 fgets(string, 4, stdin);
+			 switch(atoi(string))
+			 {
+				case 16:
+					xchan_16bit = 'y';
+					if(file_has_no_footer)			//set n_rec if we don't know it
+						n_rec = floor(n_byte/(2*n_chans));
+					else					//fix n_rec if it's wrong in the footer 
+						n_rec = floor((n_byte-336)/(2*n_chans));
+					break;
+				case 24:
+					xchan_24bit = 'y';
+					if(file_has_no_footer)			//set n_rec if we don't know it
+						n_rec = floor(n_byte/(4*n_chans));
+					else					//fix n_rec if it's wrong in the footer 
+						n_rec = floor((n_byte-336)/(4*n_chans));
+					break;
+				default:
+			 		fprintf(stderr,"Problem with determining the recorder used. You have to enter 16 or 24. Sorry, can't help you otherwise.\n");
+			 		exit(1);
+			 }
+			 if(!file_has_no_footer && n_chans == n_chans_in_footer)	//this looks like nrec is the  problem, we can use filenames and other info. in the footer 
+			 {
+				;		//do nothing
+			 }
+			 else
+			 {
+			  for( i=2; i<= n_chans; i++)		//start at i=2, b/c Time is in channel 1
+			  {
+			 	memset(string,0,sizeof(string));
+			 	fprintf(stderr,"Enter the name for channel %d (12 characters)\n",i);
+				fgets(string, 13, stdin);
+				k=strlen(string);
+				strlcpy(lookhead.ch[i].name, string, k);
+			  }
+			 }
+
+			}
+			else
+			 exit(1);
 		}
 	}
 
@@ -262,8 +327,7 @@ double *f_pointer[MAX_COL];
 	}
 
 
-        fprintf(stderr,"Version: 12.2.2010\n\n");
-	fprintf(stderr,"Reading file %s: %s-bit File has %d bytes of data, %d recs, %d chans\n",data, ((xchan_24bit == 'y') ? "24" : "16"),n_byte, n_rec, n_chans);
+	fprintf(stderr,"\nReading file %s: %s-bit File has %d bytes of data, %d recs, %d chans\n",data, ((xchan_24bit == 'y') ? "24" : "16"),n_byte, n_rec, n_chans);
 
 /* 20150922: I changed the way this works, so that it outputs the whole first record. */
 	fprintf(stderr,"First recs are:\n\ttime");
@@ -354,19 +418,21 @@ array with another pointer and then free the original */
 
 
 					/* footer as ascii   */
-	if(footer_out == 'y' && xchan_data_acquisition == 'y')
+	if(file_has_no_footer ==0) //footer_out == 'y' && xchan_data_acquisition == 'y' && force24 == 'n')
         {
 		fprintf(stderr,"\n");
-		printf("Footer information for file: %s\n",lookhead.title);
-		printf("The experiment began at %s on %s\n", lv_time, lv_date);
+		printf("Experiment %s began at %s on %s\n", lookhead.title, lv_time, lv_date);
 		printf("n_chans = %d, nrecs = %d\n",lookhead.nchan, lookhead.nrec);
 		for(i=2;i<=n_chans; i++)
 			printf("Channel %d (%s) was recorded at +/- %.1f volts\n", i, lookhead.ch[i].name, 10/lookhead.ch[i].gain);
 	}
-
-	if(footer_out == 'y' && xchan_data_acquisition == 'n')
-	 	fprintf(stderr,"This data file does not have a footer.\n");
-
+	else 
+	{
+		printf("File: %s has n_chans = %d, nrecs = %d\n",lookhead.title,lookhead.nchan, lookhead.nrec);
+		for(i=2;i<=n_chans; i++)
+			printf("Channel %d (%s) was recorded at unknown gain.\n", i, lookhead.ch[i].name);
+	 	fprintf(stderr,"\nThis data file does not have a footer. We assumed it was a %s file, if it's not you may want to run lv2look again with the -f or -m option.\n", (xchan_24bit == 'y') ? "24 bit" : "16 bit" );
+	}
 		
 						/*write data in look format*/
 	rite_lookfile(out_file) ;
@@ -435,6 +501,7 @@ void rite_lookfile(FILE *dfile)
 void rite_lookfile(FILE *dfile)
 {
   int i, j ;
+  int write_32();
   double temp;
 
   fwrite(&(lookhead.title[0]),1,20,dfile) ;
